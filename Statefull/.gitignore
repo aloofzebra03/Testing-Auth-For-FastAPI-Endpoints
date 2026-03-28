@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+*.engg-info/
+.streamlit/secrets.toml
+__pycache__/
+.venv/
+checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
+*.log

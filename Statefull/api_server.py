@@ -2,7 +2,6 @@ import os
 import secrets
 from dotenv import load_dotenv, set_key
 from fastapi import FastAPI, HTTPException, Depends, Header, status
-from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, APIKeyHeader
 from fastapi.openapi.docs import get_swagger_ui_html
 from google.oauth2 import id_token
@@ -210,38 +209,7 @@ def remove_allowed_email(email: str, user: dict = Depends(get_current_user)):
     
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Email not found in allowed list.")
 
-# --- Temporary Localhost Token Generator ---
-@app.get("/login-test", include_in_schema=False)
-def test_google_login():
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Google JWT Test Generator</title>
-        <script src="https://accounts.google.com/gsi/client" async defer></script>
-    </head>
-    <body style="font-family: Arial, sans-serif; margin: 40px; background-color: #f0f4f8;">
-        <h2>Generate a Real Test Google JWT</h2>
-        <p><i>Note: For this to work, you must ensure <b>http://localhost:8000</b> (and http://localhost) are listed under "Authorized JavaScript origins" in your Google Cloud Console for the Client ID: {CLIENT_ID}</i></p>
-        
-        <div id="g_id_onload"
-             data-client_id="{CLIENT_ID}"
-             data-callback="handleCredentialResponse">
-        </div>
-        <div class="g_id_signin" data-type="standard"></div>
 
-        <h3 style="margin-top:30px;">Your Fresh Token (Copy & Paste to Swagger):</h3>
-        <textarea id="tokenBox" rows="10" cols="100" style="padding:10px; font-family: monospace;" placeholder="Sign in above and your fresh JWT token will appear here..."></textarea>
-
-        <script>
-          function handleCredentialResponse(response) {{
-             document.getElementById("tokenBox").value = response.credential;
-          }}
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
 
 # if __name__ == "__main__":
 #     print("Starting Stateful Joke Generation API server on port 8000...")

@@ -64,6 +64,7 @@ exceptiongroup
 executing
 fastjsonschema
 fastapi
+firebase-admin
 ffmpeg-python
 filelock
 filetype

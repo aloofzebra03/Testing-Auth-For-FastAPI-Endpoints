@@ -37,3 +37,4 @@ uvicorn
 uvicorn[standard]
 fastapi
 fastapi[standard]
+firebase-admin

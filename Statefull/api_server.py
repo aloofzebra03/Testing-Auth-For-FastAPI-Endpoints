@@ -1,6 +1,6 @@
 import os
 import secrets
-from dotenv import load_dotenv, set_key
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends, Header, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, APIKeyHeader
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -9,12 +9,12 @@ from google.auth.transport import requests as google_requests
 from pydantic import BaseModel
 import uvicorn
 from src.graph import start_joke_generation, continue_with_explanation, get_thread_status
+from src.firebase_client import get_allowed_emails, add_allowed_email, remove_allowed_email
 
 load_dotenv()
 
 # Auth Configuration
 CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
-ALLOWED_EMAILS = set(e.strip().lower() for e in filter(None, os.getenv("ALLOWED_EMAILS", "").split(",")))
 API_KEYS = set(k.strip().strip("'").strip('"') for k in filter(None, os.getenv("API_KEYS", "").split(",")))
 DOCS_USERNAME = os.getenv("DOCS_USERNAME", "admin")
 DOCS_PASSWORD = os.getenv("DOCS_PASSWORD", "password")
@@ -37,10 +37,12 @@ def get_current_user(
         try:
             idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), CLIENT_ID)
             email = idinfo.get('email')
-            
-            if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:
+
+            # Always fetch fresh from Firestore so changes take effect immediately
+            allowed = get_allowed_emails()
+            if allowed and email not in allowed:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not authorized")
-                
+
             return {"user": "app_user", "email": email, "auth_method": "jwt"}
         except ValueError as e:
             print(f"JWT Verification Error: {e}")
@@ -173,41 +175,45 @@ def status_endpoint(request: StatusRequest, user: dict = Depends(get_current_use
 # --- Admin Endpoints for User Management ---
 
 @app.get("/admin/emails")
-def get_allowed_emails(user: dict = Depends(get_current_user)):
+def list_allowed_emails(user: dict = Depends(get_current_user)):
+    """Fetch the current allowed-email list from Firebase Firestore."""
     if user.get("auth_method") != "api_key":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins using API keys can view allowed emails.")
-    return {"success": True, "allowed_emails": list(ALLOWED_EMAILS)}
+    try:
+        emails = get_allowed_emails()
+        return {"success": True, "allowed_emails": sorted(emails)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Firebase error: {e}")
 
 @app.post("/admin/emails")
-def add_allowed_email(request: EmailRequest, user: dict = Depends(get_current_user)):
+def add_email(request: EmailRequest, user: dict = Depends(get_current_user)):
+    """Add an email to the allowed list in Firebase Firestore."""
     if user.get("auth_method") != "api_key":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins using API keys can add emails.")
-    
+
     email = request.email.strip().lower()
     if not email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email cannot be empty.")
-        
-    ALLOWED_EMAILS.add(email)
-    
-    # Update the .env file persistently
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    set_key(env_path, "ALLOWED_EMAILS", ",".join(filter(None, ALLOWED_EMAILS)))
-    
-    return {"success": True, "message": f"Added {email}", "allowed_emails": list(ALLOWED_EMAILS)}
+
+    try:
+        updated = add_allowed_email(email)
+        return {"success": True, "message": f"Added {email}", "allowed_emails": sorted(updated)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Firebase error: {e}")
 
 @app.delete("/admin/emails/{email}")
-def remove_allowed_email(email: str, user: dict = Depends(get_current_user)):
+def delete_email(email: str, user: dict = Depends(get_current_user)):
+    """Remove an email from the allowed list in Firebase Firestore."""
     if user.get("auth_method") != "api_key":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins using API keys can remove emails.")
-        
-    email = email.lower()
-    if email in ALLOWED_EMAILS:
-        ALLOWED_EMAILS.remove(email)
-        env_path = os.path.join(os.path.dirname(__file__), ".env")
-        set_key(env_path, "ALLOWED_EMAILS", ",".join(filter(None, ALLOWED_EMAILS)))
-        return {"success": True, "message": f"Removed {email}", "allowed_emails": list(ALLOWED_EMAILS)}
-    
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Email not found in allowed list.")
+
+    try:
+        updated = remove_allowed_email(email)
+        return {"success": True, "message": f"Removed {email}", "allowed_emails": sorted(updated)}
+    except KeyError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Email not found in allowed list.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Firebase error: {e}")
 
 
 

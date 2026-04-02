@@ -9,7 +9,7 @@ from google.auth.transport import requests as google_requests
 from pydantic import BaseModel
 import uvicorn
 from src.graph import start_joke_generation, continue_with_explanation, get_thread_status
-from src.firebase_client import get_allowed_emails, add_allowed_email, remove_allowed_email
+from src.firebase_client import is_email_allowed
 
 load_dotenv()
 
@@ -38,10 +38,9 @@ def get_current_user(
             idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), CLIENT_ID)
             email = idinfo.get('email')
 
-            # Always fetch fresh from Firestore so changes take effect immediately
-            allowed = get_allowed_emails()
-            if allowed and email not in allowed:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not authorized")
+            # Verify the email corresponds to a registered user document in Firestore 'users' collection
+            if not is_email_allowed(email):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not authorized: Must be a registered user.")
 
             return {"user": "app_user", "email": email, "auth_method": "jwt"}
         except ValueError as e:
@@ -172,48 +171,7 @@ def status_endpoint(request: StatusRequest, user: dict = Depends(get_current_use
         print(f"API error in /status: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-# --- Admin Endpoints for User Management ---
-
-@app.get("/admin/emails")
-def list_allowed_emails(user: dict = Depends(get_current_user)):
-    """Fetch the current allowed-email list from Firebase Firestore."""
-    if user.get("auth_method") != "api_key":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins using API keys can view allowed emails.")
-    try:
-        emails = get_allowed_emails()
-        return {"success": True, "allowed_emails": sorted(emails)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Firebase error: {e}")
-
-@app.post("/admin/emails")
-def add_email(request: EmailRequest, user: dict = Depends(get_current_user)):
-    """Add an email to the allowed list in Firebase Firestore."""
-    if user.get("auth_method") != "api_key":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins using API keys can add emails.")
-
-    email = request.email.strip().lower()
-    if not email:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email cannot be empty.")
-
-    try:
-        updated = add_allowed_email(email)
-        return {"success": True, "message": f"Added {email}", "allowed_emails": sorted(updated)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Firebase error: {e}")
-
-@app.delete("/admin/emails/{email}")
-def delete_email(email: str, user: dict = Depends(get_current_user)):
-    """Remove an email from the allowed list in Firebase Firestore."""
-    if user.get("auth_method") != "api_key":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins using API keys can remove emails.")
-
-    try:
-        updated = remove_allowed_email(email)
-        return {"success": True, "message": f"Removed {email}", "allowed_emails": sorted(updated)}
-    except KeyError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Email not found in allowed list.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Firebase error: {e}")
+# The mobile app natively handles creating user documents in the 'users' collection.
 
 
 

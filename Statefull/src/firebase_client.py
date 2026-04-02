@@ -48,6 +48,10 @@ def _get_db():
 
     if service_account_json:
         info = json.loads(service_account_json)
+        # python-dotenv can mangle \n into literal \\n inside the private key.
+        # Fix it so OpenSSL can parse the PEM certificate correctly.
+        if 'private_key' in info:
+            info['private_key'] = info['private_key'].replace('\\n', '\n')
         cred = credentials.Certificate(info)
         logger.info("Firebase: using inline service-account JSON from env var.")
     elif service_account_path:
@@ -70,69 +74,17 @@ def _get_db():
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_allowed_emails() -> Set[str]:
+def is_email_allowed(email: str) -> bool:
     """
-    Fetch the current set of allowed emails from Firestore.
-    Returns an empty set if the document does not exist.
-    """
-    try:
-        db = _get_db()
-        doc = db.collection(_COLLECTION).document(_DOCUMENT).get()
-        if doc.exists:
-            emails = doc.to_dict().get(_FIELD, [])
-            return set(e.strip().lower() for e in emails if e.strip())
-        else:
-            logger.warning(
-                f"Firestore document '{_COLLECTION}/{_DOCUMENT}' not found. "
-                "Returning empty email set. Create it in the Firebase Console."
-            )
-            return set()
-    except Exception as e:
-        logger.error(f"Failed to fetch allowed emails from Firestore: {e}")
-        raise
-
-
-def add_allowed_email(email: str) -> Set[str]:
-    """
-    Add an email to the Firestore allowed list.
-    Creates the document if it does not exist.
-    Returns the updated set of emails.
+    Check if the given email corresponds to a registered user in the 'users' collection.
+    This is an O(1) point read, which scales perfectly.
     """
     email = email.strip().lower()
     try:
         db = _get_db()
-        ref = db.collection(_COLLECTION).document(_DOCUMENT)
-        # Use set with merge=True so we don't overwrite unrelated fields
-        ref.set(
-            {_FIELD: firestore.ArrayUnion([email])},
-            merge=True
-        )
-        logger.info(f"Added email to Firestore: {email}")
-        return get_allowed_emails()
+        # The document ID in the 'users' collection is the email address itself
+        doc = db.collection("users").document(email).get()
+        return doc.exists
     except Exception as e:
-        logger.error(f"Failed to add email to Firestore: {e}")
-        raise
-
-
-def remove_allowed_email(email: str) -> Set[str]:
-    """
-    Remove an email from the Firestore allowed list.
-    Returns the updated set of emails.
-    Raises KeyError if the email is not present.
-    """
-    email = email.strip().lower()
-    try:
-        db = _get_db()
-        current = get_allowed_emails()
-        if email not in current:
-            raise KeyError(f"Email '{email}' not found in allowed list.")
-
-        ref = db.collection(_COLLECTION).document(_DOCUMENT)
-        ref.update({_FIELD: firestore.ArrayRemove([email])})
-        logger.info(f"Removed email from Firestore: {email}")
-        return get_allowed_emails()
-    except KeyError:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to remove email from Firestore: {e}")
+        logger.error(f"Failed to check if email '{email}' exists in Firestore: {e}")
         raise

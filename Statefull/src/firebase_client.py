@@ -1,10 +1,18 @@
 """
-Firebase Firestore client for managing allowed emails.
+Firebase Firestore client for:
+  - Managing allowed emails (user authorization)
+  - Per-email daily rate limiting (100 requests/day)
 
 Firestore structure:
-  Collection: "auth"
-    Document: "allowed_emails"
-      Field: "emails" -> list of lowercase email strings
+  Collection: "users"
+    Document: <email>   ← authorization check (O(1) point read)
+
+  Collection: "rate_limits"
+    Document: "{email}:{YYYY-MM-DD}"  ← one doc per user per UTC day
+      Fields:
+        email      : str
+        date       : str  (YYYY-MM-DD UTC)
+        count      : int  (atomic counter, incremented per request)
 
 Setup:
   1. Go to Firebase Console -> Project Settings -> Service Accounts
@@ -16,10 +24,15 @@ Setup:
 import os
 import json
 import logging
-from typing import Set
+from datetime import datetime, timezone, timedelta
+from typing import Set, Tuple
+
+# Indian Standard Time — UTC+5:30
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 import firebase_admin
 from firebase_admin import credentials, firestore
+from google.cloud import firestore as google_firestore
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +87,10 @@ def _get_db():
 # Public API
 # ---------------------------------------------------------------------------
 
+# Daily request limit applied to JWT (email) users
+DAILY_REQUEST_LIMIT = 3
+
+
 def is_email_allowed(email: str) -> bool:
     """
     Check if the given email corresponds to a registered user in the 'users' collection.
@@ -88,3 +105,58 @@ def is_email_allowed(email: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to check if email '{email}' exists in Firestore: {e}")
         raise
+
+
+def check_and_increment_rate_limit(
+    email: str,
+    daily_limit: int = DAILY_REQUEST_LIMIT,
+) -> Tuple[int, int, bool]:
+    """
+    Atomically increment the per-email daily request counter in Firestore.
+
+    Uses a Firestore transaction so that concurrent requests cannot race and
+    send the counter past the limit without detection.
+
+    Document key: "rate_limits/{email}:{YYYY-MM-DD}"
+    The date is always UTC so the window resets at midnight UTC everywhere.
+
+    Returns:
+        (new_count, remaining, limit_exceeded)
+        - new_count      : int  — value of the counter after this increment
+        - remaining      : int  — requests still allowed today (0 if exceeded)
+        - limit_exceeded : bool — True when new_count > daily_limit
+    """
+    email = email.strip().lower()
+    today_ist = datetime.now(_IST).strftime("%Y-%m-%d")  # IST calendar date
+    doc_id = f"{email}:{today_ist}"
+
+    db = _get_db()
+    doc_ref = db.collection("rate_limits").document(doc_id)
+    transaction = db.transaction()
+
+    @google_firestore.transactional
+    def _increment(transaction: google_firestore.Transaction, ref) -> int:
+        """Read-increment-write inside a single Firestore transaction."""
+        snapshot = ref.get(transaction=transaction)
+        current_count: int = snapshot.get("count") if snapshot.exists else 0
+        new_count = current_count + 1
+        transaction.set(
+            ref,
+            {"email": email, "date": today_ist, "count": new_count},  # IST date stored
+            merge=True,
+        )
+        return new_count
+
+    try:
+        new_count = _increment(transaction, doc_ref)
+    except Exception as e:
+        logger.error(f"Rate-limit Firestore transaction failed for '{email}': {e}")
+        raise
+
+    remaining = max(0, daily_limit - new_count)
+    limit_exceeded = new_count > daily_limit
+    logger.info(
+        f"Rate-limit | email={email} | date={today_ist} (IST) | "
+        f"count={new_count}/{daily_limit} | exceeded={limit_exceeded}"
+    )
+    return new_count, remaining, limit_exceeded

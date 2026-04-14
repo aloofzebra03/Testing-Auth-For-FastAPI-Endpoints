@@ -1,7 +1,7 @@
 import os
 import secrets
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Header, status
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, Response, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, APIKeyHeader
 from fastapi.openapi.docs import get_swagger_ui_html
 from google.oauth2 import id_token
@@ -9,7 +9,7 @@ from google.auth.transport import requests as google_requests
 from pydantic import BaseModel
 import uvicorn
 from src.graph import start_joke_generation, continue_with_explanation, get_thread_status
-from src.firebase_client import is_email_allowed
+from src.firebase_client import is_email_allowed, check_and_increment_rate_limit, DAILY_REQUEST_LIMIT
 
 load_dotenv()
 
@@ -24,12 +24,14 @@ security_basic = HTTPBasic()
 api_key_schema = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 def get_current_user(
+    response: Response,
     auth_header: HTTPAuthorizationCredentials | None = Depends(security_bearer),
     api_key: str | None = Depends(api_key_schema)
 ):
     if api_key:
         api_key_clean = api_key.strip().strip("'").strip('"')
         if api_key_clean in API_KEYS:
+            # API key users are internal/admin — not subject to rate limiting
             return {"user": "admin_api_user", "auth_method": "api_key"}
         
     if auth_header:
@@ -38,11 +40,37 @@ def get_current_user(
             idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), CLIENT_ID)
             email = idinfo.get('email')
 
-            # Verify the email corresponds to a registered user document in Firestore 'users' collection
+            # 1. Verify the email is a registered user in Firestore 'users' collection
             if not is_email_allowed(email):
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not authorized: Must be a registered user.")
 
-            return {"user": "app_user", "email": email, "auth_method": "jwt"}
+            # 2. Enforce per-email daily rate limit
+            new_count, remaining, limit_exceeded = check_and_increment_rate_limit(email)
+
+            # Always add rate-limit headers so the client can display usage
+            response.headers["X-RateLimit-Limit"]     = str(DAILY_REQUEST_LIMIT)
+            response.headers["X-RateLimit-Remaining"] = str(remaining)
+            response.headers["X-RateLimit-Policy"]    = f"{DAILY_REQUEST_LIMIT};w=86400"  # 86400s = 1 day
+
+            if limit_exceeded:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=(
+                        f"Daily limit of {DAILY_REQUEST_LIMIT} requests exceeded. "
+                        "Counter resets at midnight IST (Indian Standard Time)."
+                    ),
+                    headers={
+                        "X-RateLimit-Limit":     str(DAILY_REQUEST_LIMIT),
+                        "X-RateLimit-Remaining": "0",
+                        "X-RateLimit-Policy":    f"{DAILY_REQUEST_LIMIT};w=86400",
+                        "Retry-After":           "86400",
+                    }
+                )
+
+            return {"user": "app_user", "email": email, "auth_method": "jwt",
+                    "requests_today": new_count, "requests_remaining": remaining}
+        except HTTPException:
+            raise  # re-raise 403 / 429 as-is
         except ValueError as e:
             print(f"JWT Verification Error: {e}")
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google JWT token")
